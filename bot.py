@@ -18,8 +18,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not BOT_TOKEN or not GROQ_API_KEY:
     raise ValueError("BOT_TOKEN and GROQ_API_KEY must be set in environment variables.")
 
+MODEL = "qwen/qwen3-72b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "qwen-3-32b"  # Ensure this model is available; fallback to "mixtral-8x7b-32768" if needed
 
 SYSTEM_PROMPT = (
     "You are an expert software engineer. "
