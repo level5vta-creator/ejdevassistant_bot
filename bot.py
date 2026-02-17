@@ -1,19 +1,19 @@
 import os
 import logging
 import asyncio
-import requests
 from flask import Flask, request, jsonify
+from groq import Groq
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import ParseMode
 
 # -------------------- Configuration --------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-REQUIRED_ENV_VARS = ["BOT_TOKEN", "DEEPSEEK_API_KEY", "WEBHOOK_URL"]
+REQUIRED_ENV_VARS = ["BOT_TOKEN", "GROQ_API_KEY", "WEBHOOK_URL", "PORT"]
 missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
 if missing:
     raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
@@ -47,58 +47,23 @@ def get_developer_info() -> str:
     )
 
 
-# -------------------- In-Memory Storage --------------------
-# user_sessions: stores conversation history (list of messages with role and content)
-user_sessions = {}
-
-# -------------------- DeepSeek API Integration --------------------
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
-TIMEOUT = 30
-
-
-def get_ai_response(user_id: int, message_text: str) -> str:
-    """Call DeepSeek API with conversation history and return response."""
-    if user_id not in user_sessions:
-        user_sessions[user_id] = []
-    history = user_sessions[user_id]
-
-    history.append({"role": "user", "content": message_text})
-    if len(history) > 10:
-        history = history[-10:]
-        user_sessions[user_id] = history
-
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": history,
-        "stream": False
-    }
-
+def ask_ai(prompt: str) -> str:
     try:
-        response = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        assistant_msg = data["choices"][0]["message"]["content"]
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-        history.append({"role": "assistant", "content": assistant_msg})
-        if len(history) > 10:
-            history = history[-10:]
-            user_sessions[user_id] = history
+        completion = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": "You are EJDevAssistant, an expert coding AI."},
+                {"role": "user", "content": prompt}
+            ]
+        )
 
-        return assistant_msg
-    except requests.RequestException as e:
-        logger.error(f"DeepSeek API request error for user {user_id}: {e}")
-        return "AI service temporarily unavailable. Please try again in a moment."
-    except (KeyError, IndexError, ValueError) as e:
-        logger.error(f"DeepSeek API response parse error for user {user_id}: {e}")
-        return "Received an unexpected response from AI service. Please try again."
+        return completion.choices[0].message.content
+
     except Exception as e:
-        logger.error(f"DeepSeek API unexpected error for user {user_id}: {e}")
-        return "Something went wrong while processing your request."
+        print("Groq Error:", e)
+        return "⚠️ AI service temporarily unavailable. Please try again."
 
 
 # -------------------- Telegram Handlers --------------------
@@ -113,7 +78,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "👋 Welcome to ejdevassistant_bot!\n\n"
-        "I am your AI assistant powered by DeepSeek. Send me any text and I'll respond directly.",
+        "I am your AI assistant powered by Groq. Send me any text and I'll respond directly.",
         reply_markup=reply_markup
     )
 
@@ -124,7 +89,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📚 *Help*\n\n"
         "/start - Show main menu\n"
         "/help - Show this help\n\n"
-        "You can send any text directly and I'll reply with DeepSeek AI."
+        "You can send any text directly and I'll reply with Groq AI."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -136,14 +101,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "ask_ai":
         await query.edit_message_text(
-            "✅ AI mode is ready. Send me any message and I'll respond using DeepSeek AI.\n\n"
+            "✅ AI mode is ready. Send me any message and I'll respond using Groq AI.\n\n"
             "Use /start to return to the main menu.",
             parse_mode=ParseMode.MARKDOWN
         )
     elif query.data == "about":
         about_text = (
             "🧠 *About This Bot*\n\n"
-            "This is an AI assistant powered by DeepSeek, designed to help with coding and more.\n"
+            "This is an AI assistant powered by Groq, designed to help with coding and more.\n"
             "Built by Eshan, a Software Engineer from Sri Lanka.\n"
             "Hosted securely on Railway."
         )
@@ -160,11 +125,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages and return AI output directly."""
-    user_id = update.effective_user.id
-    text = update.message.text
-
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    response = get_ai_response(user_id, text)
+    user_text = update.message.text
+    response = ask_ai(user_text)
     await update.message.reply_text(response)
 
 
@@ -196,25 +158,9 @@ def health():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """Handle incoming Telegram updates."""
-    try:
-        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        asyncio.run(telegram_app.process_update(update))
-        return "OK", 200
-    except Exception as e:
-        logger.error(f"Error processing update: {e}")
-        return "Error", 500
-
-
-def set_webhook():
-    """Set the webhook URL for the bot."""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}/webhook"
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        logger.info(f"Webhook set to {WEBHOOK_URL}/webhook")
-    except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
-        raise
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    asyncio.run(telegram_app.process_update(update))
+    return "OK", 200
 
 
 # -------------------- Main --------------------
