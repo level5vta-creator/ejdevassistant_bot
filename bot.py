@@ -182,7 +182,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
 # -------------------- Flask Webhook Setup --------------------
-flask_app = Flask(__name__)
+app = Flask(__name__)
 
 # Build Telegram Application
 telegram_app = Application.builder().token(BOT_TOKEN).build()
@@ -192,11 +192,11 @@ telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 telegram_app.add_error_handler(error_handler)
 
-@flask_app.route("/", methods=["GET"])
+@app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "healthy"}), 200
 
-@flask_app.route(f"/webhook", methods=["POST"])
+@app.route(f"/webhook", methods=["POST"])
 def webhook():
     """Handle incoming Telegram updates."""
     try:
@@ -221,8 +221,8 @@ def set_webhook():
         raise
 
 # -------------------- Main --------------------
+import os
+
 if __name__ == "__main__":
-    # Set webhook
-    set_webhook()
-    # Run Flask app
-    flask_app.run(host="0.0.0.0", port=PORT)
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
