@@ -1,90 +1,80 @@
-import logging
 import os
+import logging
 import asyncio
-import requests
-import json
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.constants import ChatAction
+from functools import partial
 
-# --- Configuration ---
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatAction
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
+
+# ---------- Environment variables ----------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable not set.")
+if not DEEPSEEK_API_KEY:
+    raise ValueError("DEEPSEEK_API_KEY environment variable not set.")
+
+# ---------- DeepSeek configuration ----------
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"
+SYSTEM_PROMPT = (
+    "You are EJDevAssistant, an expert AI coding assistant. "
+    "You generate and fix production-ready code. "
+    "You support Python, JavaScript, Java, HTML, CSS. "
+    "Always return clean markdown code blocks. "
+    "Be concise and professional."
+)
+TEMPERATURE = 0.2
+MAX_TOKENS = 2000
+
+# ---------- Logging ----------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-if not BOT_TOKEN or not OPENROUTER_API_KEY:
-    raise ValueError("Missing BOT_TOKEN or OPENROUTER_API_KEY environment variables")
-
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "deepseek/deepseek-coder"
-SYSTEM_PROMPT = (
-    "You are an expert software engineer. "
-    "Fix bugs and generate clean production-ready Python, Java, JavaScript, HTML, CSS code. "
-    "Always return formatted markdown code blocks. "
-    "Be direct and professional. Do not add unnecessary explanations."
-)
-
-# --- AI Query Function ---
-def query_ai_sync(prompt: str) -> str:
-    """Synchronous function to call OpenRouter API."""
+# ---------- Helper: DeepSeek API call (blocking, run in executor) ----------
+def _call_deepseek_sync(prompt: str) -> str:
+    """Synchronous DeepSeek API call using requests."""
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
     }
     payload = {
-        "model": MODEL,
+        "model": DEEPSEEK_MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,
-        "max_tokens": 2000
+        "temperature": TEMPERATURE,
+        "max_tokens": MAX_TOKENS,
     }
     try:
-        response = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=30)
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         data = response.json()
         return data["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"AI query failed: {e}")
-        raise
+        logger.error(f"DeepSeek API error: {e}")
+        raise  # re-raise to be handled in async wrapper
 
-async def query_ai(prompt: str) -> str:
-    """Async wrapper for query_ai_sync using to_thread."""
-    return await asyncio.to_thread(query_ai_sync, prompt)
+async def call_deepseek(prompt: str) -> str:
+    """Asynchronous wrapper for DeepSeek API call."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _call_deepseek_sync, prompt)
 
-# --- Helper Functions ---
-def extract_clean_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
-    """Extract text without bot mention if bot is mentioned. Returns None if not mentioned."""
-    message = update.effective_message
-    if not message or not message.text or not message.entities:
-        return None
-
-    bot_username = context.bot.username.lower()
-    text = message.text
-    entities = message.entities
-
-    # Check if any mention entity points to this bot
-    for entity in entities:
-        if entity.type == "mention":
-            mention = text[entity.offset:entity.offset+entity.length]
-            if mention.lower() == f"@{bot_username}":
-                # Remove the mention from the text (strip it)
-                clean = text[:entity.offset] + text[entity.offset+entity.length:]
-                return clean.strip()
-
-    return None
-
-async def send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send typing indicator."""
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-
-# --- Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message with inline keyboard."""
+# ---------- Inline keyboard ----------
+def get_main_keyboard():
     keyboard = [
         [
             InlineKeyboardButton("🔧 Fix Code", callback_data="fix"),
@@ -93,113 +83,148 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("📖 Help", callback_data="help"),
             InlineKeyboardButton("📞 Contact", callback_data="contact"),
-        ]
+        ],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(keyboard)
+
+# ---------- Command handlers ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to AI Coding Bot!\n\n"
-        "Mention me in a group with your coding request.\n"
-        "Example: `@{} fix this python code: print(\"hello`".format(context.bot.username),
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        "👋 Welcome to EJDevAssistant!\n\n"
+        "I can help you fix or generate code. Mention me in a group with your request.",
+        reply_markup=get_main_keyboard(),
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show usage instructions."""
-    text = (
-        "📖 *How to use:*\n"
-        "Mention the bot in a group with your request.\n\n"
-        "*Examples:*\n"
-        "`@{} fix this Python code:`\n"
-        "`print(\"hello`\n\n"
-        "`@{} generate HTML login page`\n\n"
-        "Supported languages: Python, Java, JavaScript, HTML, CSS"
-    ).format(context.bot.username, context.bot.username)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    help_text = (
+        "📖 *How to use me:*\n\n"
+        "• In a group, mention me followed by your request.\n"
+        "  Example: `@EJDevAssistant fix this Python error: ...`\n"
+        "• Use /start to see the main menu.\n"
+        "• Use /contact to get owner info."
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show contact info."""
-    text = (
-        "📞 *Contact*\n"
+    contact_text = (
+        "📞 *Contact Information*\n\n"
         "Telegram: @ejag78\n"
         "Email: ejfxprotrade@gmail.com"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(contact_text, parse_mode="Markdown")
 
+# ---------- Callback query handler ----------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline button presses."""
     query = update.callback_query
     await query.answer()
 
-    if query.data == "fix":
-        text = "Please mention me in a group with the code you want to fix.\nExample: `@{} fix this ...`".format(context.bot.username)
-    elif query.data == "generate":
-        text = "Please mention me in a group with your code generation request.\nExample: `@{} generate ...`".format(context.bot.username)
-    elif query.data == "help":
+    data = query.data
+    if data == "fix":
         text = (
-            "📖 *How to use:*\n"
-            "Mention the bot in a group with your request.\n\n"
-            "*Examples:*\n"
-            "`@{} fix this Python code:`\n"
-            "`print(\"hello`\n\n"
-            "`@{} generate HTML login page`"
-        ).format(context.bot.username, context.bot.username)
-    elif query.data == "contact":
-        text = "📞 *Contact*\nTelegram: @ejag78\nEmail: ejfxprotrade@gmail.com"
+            "🔧 *Fix Code*\n\n"
+            "Mention me in a group with the code you need fixed.\n"
+            "Example: `@EJDevAssistant fix this function: ...`"
+        )
+    elif data == "generate":
+        text = (
+            "🧠 *Generate Code*\n\n"
+            "Mention me in a group with the description of the code you need.\n"
+            "Example: `@EJDevAssistant generate a Python function to sort a list`"
+        )
+    elif data == "help":
+        text = (
+            "📖 *Help*\n\n"
+            "• Mention me in a group with your request.\n"
+            "• Use /start to see the main menu.\n"
+            "• Use /contact to get owner info."
+        )
+    elif data == "contact":
+        text = (
+            "📞 *Contact*\n\n"
+            "Telegram: @ejag78\n"
+            "Email: ejfxprotrade@gmail.com"
+        )
     else:
         text = "Unknown option."
 
     await query.edit_message_text(text, parse_mode="Markdown")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process messages: respond only if bot is mentioned."""
-    # Ignore bot's own messages
-    if update.effective_user and update.effective_user.is_bot:
+# ---------- Message handler for groups (mention only) ----------
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message or not message.text:
         return
 
-    clean_prompt = extract_clean_text(update, context)
-    if clean_prompt is None:
-        return  # bot not mentioned
+    # Ignore messages from other bots
+    if message.from_user.is_bot:
+        return
 
-    # Show typing indicator
-    await send_typing(update, context)
+    bot_username = context.bot.username.lower()
+    text = message.text
+
+    # Check if the bot is mentioned via entities
+    mentioned = False
+    prompt = None
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                mention = text[entity.offset : entity.offset + entity.length]
+                if mention.lower() == f"@{bot_username}":
+                    mentioned = True
+                    # Remove the mention and any following whitespace
+                    prompt = text[:entity.offset] + text[entity.offset + entity.length :]
+                    prompt = prompt.strip()
+                    break
+
+    if not mentioned:
+        return
+
+    if not prompt:
+        prompt = "Hello"  # fallback if only mention
+
+    # Send typing indicator
+    await context.bot.send_chat_action(
+        chat_id=message.chat_id, action=ChatAction.TYPING
+    )
 
     try:
-        # Get AI response
-        ai_response = await query_ai(clean_prompt)
-        # Send response with Markdown
-        await update.message.reply_text(ai_response, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        await update.message.reply_text(
-            "❌ Sorry, an error occurred while processing your request. Please try again later."
-        )
+        # Call DeepSeek API
+        response = await call_deepseek(prompt)
+        await message.reply_text(response, parse_mode="Markdown")
+    except Exception:
+        await message.reply_text("⚠️ AI request failed. Try again.")
 
+# ---------- Error handler ----------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log errors and notify user."""
-    logger.error(f"Update {update} caused error {context.error}")
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "An unexpected error occurred. Please try again later."
-        )
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
-# --- Main ---
+# ---------- Main ----------
 def main():
-    """Start the bot."""
-    # Create Application
+    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Register handlers
+    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("contact", contact))
+
+    # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Add message handler for groups (mention only)
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+            handle_group_message,
+        )
+    )
+
+    # Add error handler
     application.add_error_handler(error_handler)
 
     # Start polling
-    logger.info("Bot started polling...")
-    application.run_polling()
+    logger.info("Starting EJDevAssistant...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
