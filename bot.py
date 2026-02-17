@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram AI Assistant Bot using OpenRouter (Qwen model)
+Telegram AI Assistant Bot using HuggingFace (Qwen model)
 Polling mode, no webhook.
 """
 
@@ -8,8 +8,6 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Optional
-
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -20,17 +18,15 @@ from telegram.ext import (
     filters,
 )
 
-# --- Configuration ---
+# --- Configuration (Railway variables: BOT_TOKEN, HF_API_KEY) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+HF_API_KEY = os.environ.get("HF_API_KEY")
 
-if not BOT_TOKEN or not OPENROUTER_API_KEY:
-    logging.critical("Missing BOT_TOKEN or OPENROUTER_API_KEY environment variables.")
+if not BOT_TOKEN or not HF_API_KEY:
+    logging.critical("Missing BOT_TOKEN or HF_API_KEY environment variables.")
     sys.exit(1)
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "qwen/qwen-2-7b-instruct"
-SYSTEM_PROMPT = "You are EJDevAssistant, an expert coding AI. Provide clear, correct, production-ready code."
+HF_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-Coder-7B-Instruct"
 
 # --- Logging ---
 logging.basicConfig(
@@ -39,29 +35,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- OpenRouter API call (synchronous, run in thread) ---
-def call_openrouter(user_message: str) -> Optional[str]:
-    """Call OpenRouter API and return assistant reply or None on failure."""
+# --- HuggingFace API call (synchronous, run in thread) ---
+def call_hf(user_message: str) -> str:
+    """Call HuggingFace API and return assistant reply."""
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {HF_API_KEY}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
+        "inputs": user_message,
+        "parameters": {
+            "max_new_tokens": 500,
+            "temperature": 0.7,
+        },
     }
-    try:
-        resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        # Extract assistant message
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.error(f"OpenRouter API error: {e}")
-        return None
+    response = requests.post(HF_URL, headers=headers, json=payload, timeout=60)
+    if response.status_code != 200:
+        logger.error(response.text)
+        return "⚠️ AI service temporarily unavailable. Please try again."
+
+    result = response.json()
+    if isinstance(result, list) and "generated_text" in result[0]:
+        return result[0]["generated_text"]
+    return "⚠️ AI returned unexpected format."
 
 # --- Helper: split long messages (Telegram limit 4096) ---
 def split_message(text: str, max_len: int = 4096):
@@ -128,7 +124,7 @@ async def button_callback(update: Update, context):
     await context.bot.send_message(chat_id=chat_id, text=text)
 
 async def handle_message(update: Update, context):
-    """Process any text message (non‑command) via OpenRouter AI."""
+    """Process any text message (non‑command) via HuggingFace AI."""
     user_text = update.message.text
     logger.info(f"Message from {update.effective_user.id}: {user_text[:50]}...")
 
@@ -137,13 +133,7 @@ async def handle_message(update: Update, context):
 
     # Run the blocking API call in a thread to not block the event loop
     loop = asyncio.get_running_loop()
-    reply_content = await loop.run_in_executor(None, call_openrouter, user_text)
-
-    if reply_content is None:
-        await update.message.reply_text(
-            "⚠️ AI service temporarily unavailable. Please try again."
-        )
-        return
+    reply_content = await loop.run_in_executor(None, call_hf, user_text)
 
     # Split and send
     for chunk in split_message(reply_content):
