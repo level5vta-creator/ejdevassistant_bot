@@ -35,6 +35,7 @@ DEV_INFO = {
     "email": "ejfxprotrade@gmail.com"
 }
 
+
 def get_developer_info() -> str:
     return (
         f"*👤 Developer Information*\n\n"
@@ -47,6 +48,7 @@ def get_developer_info() -> str:
         f"*Email:* {DEV_INFO['email']}"
     )
 
+
 # -------------------- In-Memory Storage --------------------
 # user_sessions: stores conversation history (list of messages with role and content)
 user_sessions = {}
@@ -57,6 +59,7 @@ user_ai_mode = {}
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 TIMEOUT = 30
+
 
 def get_ai_response(user_id: int, message_text: str) -> str:
     """Call DeepSeek API with conversation history and return response."""
@@ -101,6 +104,7 @@ def get_ai_response(user_id: int, message_text: str) -> str:
         logger.error(f"DeepSeek API error for user {user_id}: {e}")
         return "AI service temporarily unavailable."
 
+
 # -------------------- Telegram Handlers --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a welcome message with inline keyboard."""
@@ -117,6 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send help message."""
     help_text = (
@@ -127,6 +132,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use the other buttons to learn more about the bot and its developer."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
@@ -159,6 +165,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.edit_message_text(contact_text, parse_mode=ParseMode.MARKDOWN)
 
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages."""
     user_id = update.effective_user.id
@@ -177,9 +184,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please use /start to access the main menu and select an option."
         )
 
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors."""
     logger.error(f"Update {update} caused error {context.error}")
+
 
 # -------------------- Flask Webhook Setup --------------------
 app = Flask(__name__)
@@ -192,22 +201,38 @@ telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 telegram_app.add_error_handler(error_handler)
 
+telegram_app_initialized = False
+
+
+def ensure_telegram_initialized() -> None:
+    global telegram_app_initialized
+    if not telegram_app_initialized:
+        asyncio.run(telegram_app.initialize())
+        telegram_app_initialized = True
+
+
+# Initialize once at startup so webhook updates can be processed immediately
+ensure_telegram_initialized()
+
+
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "healthy"}), 200
 
-@app.route(f"/webhook", methods=["POST"])
+
+@app.route("/webhook", methods=["POST"])
 def webhook():
     """Handle incoming Telegram updates."""
     try:
         update_data = request.get_json(force=True)
         update = Update.de_json(update_data, telegram_app.bot)
-        # Process update asynchronously
+        ensure_telegram_initialized()
         asyncio.run(telegram_app.process_update(update))
         return "OK", 200
     except Exception as e:
         logger.error(f"Error processing update: {e}")
         return "Error", 500
+
 
 def set_webhook():
     """Set the webhook URL for the bot."""
@@ -220,9 +245,7 @@ def set_webhook():
         logger.error(f"Failed to set webhook: {e}")
         raise
 
-# -------------------- Main --------------------
-import os
 
+# -------------------- Main --------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
